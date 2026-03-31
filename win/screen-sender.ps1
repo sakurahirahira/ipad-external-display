@@ -118,8 +118,8 @@ public class ScreenSender : IDisposable
 
     public void Dispose()
     {
-        stream?.Close();
-        client?.Close();
+        if (stream != null) stream.Close();
+        if (client != null) client.Close();
     }
 }
 "@ -ReferencedAssemblies System.Drawing, System.Windows.Forms
