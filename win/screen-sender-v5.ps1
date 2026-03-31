@@ -273,14 +273,23 @@ public class DXGISender : IDisposable
                 hr = mapTex(context, stagingTex, 0, 1, 0, out mapped);
                 if (hr == 0)
                 {
-                    // Copy to fullBmp
+                    // Copy DXGI data to fullBmp
                     var bd = fullBmp.LockBits(new Rectangle(0, 0, texW, texH),
                         ImageLockMode.WriteOnly, PixelFormat.Format32bppRgb);
-                    for (int y = 0; y < texH; y++)
+                    if (mapped.RowPitch == (uint)bd.Stride)
                     {
-                        IntPtr src = new IntPtr(mapped.pData.ToInt64() + y * mapped.RowPitch);
-                        IntPtr dst = new IntPtr(bd.Scan0.ToInt64() + y * bd.Stride);
-                        N.CopyMemory(dst, src, (uint)(texW * 4));
+                        // Fast: single memcpy
+                        N.CopyMemory(bd.Scan0, mapped.pData, (uint)(texH * bd.Stride));
+                    }
+                    else
+                    {
+                        // Row-by-row (different stride)
+                        for (int y = 0; y < texH; y++)
+                        {
+                            IntPtr src = new IntPtr(mapped.pData.ToInt64() + y * mapped.RowPitch);
+                            IntPtr dst = new IntPtr(bd.Scan0.ToInt64() + y * bd.Stride);
+                            N.CopyMemory(dst, src, (uint)(texW * 4));
+                        }
                     }
                     fullBmp.UnlockBits(bd);
                     unmapTex(context, stagingTex, 0);
