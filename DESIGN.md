@@ -115,9 +115,25 @@ Media Foundation H.264エンコーダはWindows 10/11標準搭載（mf.dll, mfpl
         └── ...
 ```
 
+## 実測結果（開発環境: 2560x1440 -> 1280x720, Wi-Fi TCP）
+
+| バージョン | 方式 | FPS | キャプチャ | エンコード | 送信 | 備考 |
+|-----------|------|-----|-----------|-----------|------|------|
+| v1 | CopyFromScreen + JPEG | 10 | 80-100ms | 15ms | 0.1ms | 毎フレームBitmap生成 |
+| v2 | CopyFromScreen + バッファ再利用 | 12-15 | 50-90ms | 13ms | 0.1ms | バッファ再利用 |
+| v3 | StretchBlt + DIBSection | 20 | 45ms | 4-5ms | 0.1ms | 共有メモリでコピー不要 |
+| v4 | v3 + パイプライン | 21 | 35-50ms | 4-5ms | 0.1ms | キャプチャとエンコード並行 |
+
+### ボトルネック分析
+- GDI StretchBltがDWMのvsyncに同期するため35-50msかかる
+- エンコード（4ms）と送信（0.1ms）はほぼ問題なし
+- **GDI方式の理論上限: 約25fps**
+- 60fps到達にはDXGI Desktop DuplicationまたはWindows.Graphics.Captureが必要
+
 ## 未確認事項
 
-- [ ] 会社PCにffmpegが入っているか（`Get-Command ffmpeg`で確認）
-- [ ] テザリング接続時のiPadのローカルIPアドレス体系
+- [x] 会社PCにffmpegが入っているか → 開発PCにはある（8.0.1）が本番PCにはない
+- [ ] テザリング接続時のiPadのローカルIPアドレス体系（通常172.20.10.x）
 - [ ] 会社PCのGPU種類（Media FoundationのH.264 MFT対応状況に影響）
-- [ ] 会社のセキュリティポリシーでPowerShellスクリプト実行が許可されているか（ExecutionPolicy）
+- [ ] 会社PCにPowerShell 7が入っているか
+- [ ] 会社のセキュリティポリシーでPowerShellスクリプト実行が許可されているか（ExecutionPolicy Bypass で回避可能か）
