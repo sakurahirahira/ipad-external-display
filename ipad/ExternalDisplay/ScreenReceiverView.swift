@@ -27,9 +27,9 @@ struct ScreenReceiverView: View {
                         .font(.body)
                         .foregroundColor(.gray)
                         .textSelection(.enabled)
-                    Text("FPS: \(receiver.fps, specifier: "%.1f")")
-                        .font(.body)
-                        .foregroundColor(.green)
+                    Text("Connections: \(receiver.connectionCount)")
+                        .font(.caption)
+                        .foregroundColor(.gray)
                 }
             }
 
@@ -58,6 +58,7 @@ class ScreenReceiver: ObservableObject {
     @Published var currentImage: UIImage?
     @Published var fps: Double = 0
     @Published var localIP: String = "..."
+    @Published var connectionCount: Int = 0
     let port: UInt16 = 9000
 
     private var listener: NWListener?
@@ -88,11 +89,35 @@ class ScreenReceiver: ObservableObject {
             return
         }
 
+        listener?.stateUpdateHandler = { state in
+            print("Listener state: \(state)")
+        }
+
         listener?.newConnectionHandler = { [weak self] conn in
             guard let self else { return }
+            // Cancel previous connection if any
             self.connection?.cancel()
             self.connection = conn
+
+            conn.stateUpdateHandler = { [weak self] state in
+                switch state {
+                case .ready:
+                    print("Connection ready: \(conn.endpoint)")
+                case .failed(let error):
+                    print("Connection failed: \(error)")
+                    self?.handleDisconnect()
+                case .cancelled:
+                    print("Connection cancelled")
+                    self?.handleDisconnect()
+                default:
+                    break
+                }
+            }
+
             conn.start(queue: self.queue)
+            DispatchQueue.main.async {
+                self.connectionCount += 1
+            }
             self.receiveFrameLoop(conn)
             print("Client connected: \(conn.endpoint)")
         }
@@ -101,19 +126,34 @@ class ScreenReceiver: ObservableObject {
         print("Listening on port \(port)")
     }
 
+    private func handleDisconnect() {
+        DispatchQueue.main.async {
+            self.currentImage = nil
+            self.fps = 0
+            self.frameCount = 0
+        }
+        print("Disconnected. Listener still active, waiting for new connection...")
+    }
+
     private func receiveFrameLoop(_ conn: NWConnection) {
         conn.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] data, _, isComplete, error in
-            guard let self, let data, data.count == 4 else {
-                if isComplete {
-                    print("Connection closed")
-                    DispatchQueue.main.async { self?.currentImage = nil }
-                }
+            guard let self else { return }
+
+            if isComplete || error != nil {
+                print("Connection ended: \(error?.localizedDescription ?? "closed")")
+                self.handleDisconnect()
+                return
+            }
+
+            guard let data, data.count == 4 else {
+                self.handleDisconnect()
                 return
             }
 
             let frameSize = Int(data.withUnsafeBytes { $0.load(as: UInt32.self) })
             guard frameSize > 0, frameSize < 10_000_000 else {
                 print("Invalid frame size: \(frameSize)")
+                self.handleDisconnect()
                 return
             }
 
