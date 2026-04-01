@@ -1,4 +1,4 @@
-import SwiftUI
+IPimport SwiftUI
 
 @main
 struct ExternalDisplayApp: App {
