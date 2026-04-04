@@ -14,3 +14,8 @@ build/
 # Windows
 Thumbs.db
 desktop.ini
+
+# Binaries
+*.exe
+*.dll
+*.log

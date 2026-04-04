@@ -70,7 +70,13 @@ public class FFMjpegSender : IDisposable
         psi.FileName = ffmpegPath;
 
         string input;
-        if (!string.IsNullOrEmpty(captureArea))
+        if (!string.IsNullOrEmpty(captureArea) && captureArea.StartsWith("title="))
+        {
+            // Window title capture mode: "title=WindowTitle"
+            string title = captureArea.Substring(6);
+            input = "-f gdigrab -framerate " + fps + " -i title=" + title;
+        }
+        else if (!string.IsNullOrEmpty(captureArea))
         {
             // captureArea format: WxH+X+Y (e.g. "1366x1024+477+1440")
             var parts = captureArea.Replace("+", "x").Split('x');
@@ -83,9 +89,10 @@ public class FFMjpegSender : IDisposable
             input = "-f gdigrab -framerate " + fps + " -i desktop";
         }
 
-        // ffmpeg scale uses colon separator (e.g. 1920:1080)
+        // Scale to fit target resolution while keeping aspect ratio, pad with black bars
         string res = resolution.Replace("x", ":");
-        string scaleFilter = string.IsNullOrEmpty(res) ? "" : "-vf scale=" + res + " ";
+        string scaleFilter = string.IsNullOrEmpty(res) ? "" :
+            "-vf \"scale=" + res + ":force_original_aspect_ratio=decrease,pad=" + res + ":(ow-iw)/2:(oh-ih)/2:black\" ";
 
         psi.Arguments = "-hide_banner -loglevel error " +
             input + " " +
