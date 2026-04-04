@@ -11,17 +11,24 @@ struct ScreenReceiverView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            // AVPlayer video
+            // AVPlayer video (H.264 mode)
             if let player = receiver.player {
                 VideoPlayer(player: player)
                     .ignoresSafeArea()
             }
 
-            // Fallback JPEG mode
+            // JPEG mode
             if receiver.mode == "JPEG", let image = receiver.currentImage {
                 Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
+                    .ignoresSafeArea()
+            }
+
+            // Touch overlay (works for both JPEG and H.264 modes)
+            if receiver.player != nil || receiver.currentImage != nil {
+                Color.clear
+                    .contentShape(Rectangle())
                     .ignoresSafeArea()
                     .gesture(
                         DragGesture(minimumDistance: 0, coordinateSpace: .global)
@@ -29,20 +36,40 @@ struct ScreenReceiverView: View {
                                 let size = UIScreen.main.bounds.size
                                 let x = Float(value.location.x / size.width)
                                 let y = Float(value.location.y / size.height)
-                                // First touch or move
                                 if value.translation == .zero {
-                                    receiver.sendTouch(type: 1, x: x, y: y) // touchDown
+                                    receiver.sendTouch(type: 1, x: x, y: y)
                                 } else {
-                                    receiver.sendTouch(type: 2, x: x, y: y) // touchMoved
+                                    receiver.sendTouch(type: 2, x: x, y: y)
                                 }
                             }
                             .onEnded { value in
                                 let size = UIScreen.main.bounds.size
                                 let x = Float(value.location.x / size.width)
                                 let y = Float(value.location.y / size.height)
-                                receiver.sendTouch(type: 3, x: x, y: y) // touchUp
+                                receiver.sendTouch(type: 3, x: x, y: y)
                             }
                     )
+            }
+
+            // PC mouse cursor overlay (high-frequency, independent of frame rate)
+            if receiver.cursorVisible {
+                Canvas { context, size in
+                    let x = CGFloat(receiver.cursorRelX) * size.width
+                    let y = CGFloat(receiver.cursorRelY) * size.height
+                    var arrow = Path()
+                    arrow.move(to: CGPoint(x: x, y: y))
+                    arrow.addLine(to: CGPoint(x: x, y: y + 20))
+                    arrow.addLine(to: CGPoint(x: x + 6, y: y + 16))
+                    arrow.addLine(to: CGPoint(x: x + 10, y: y + 24))
+                    arrow.addLine(to: CGPoint(x: x + 13, y: y + 22))
+                    arrow.addLine(to: CGPoint(x: x + 9, y: y + 14))
+                    arrow.addLine(to: CGPoint(x: x + 15, y: y + 14))
+                    arrow.closeSubpath()
+                    context.fill(arrow, with: .color(.white))
+                    context.stroke(arrow, with: .color(.black), lineWidth: 1.5)
+                }
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
             }
 
             // UI overlay
@@ -120,6 +147,10 @@ class ScreenReceiver: ObservableObject {
     @Published var localIP: String = "..."
     @Published var mode: String = "waiting"
     @Published var touchEnabled = false
+    @Published var cursorRelX: Float = 0
+    @Published var cursorRelY: Float = 0
+    @Published var cursorVisible = false
+    private var h264Mode = false
     let port: UInt16 = 9000
 
     private var listener: NWListener?
@@ -211,9 +242,9 @@ class ScreenReceiver: ObservableObject {
             }
 
             conn.start(queue: self.queue)
-            self.receiveJPEGHeader(conn)
+            self.receiveJPEGHeader(conn) // Will detect H264 magic or JPEG frames
             DispatchQueue.main.async {
-                self.mode = "JPEG"
+                self.mode = "connecting"
                 self.touchEnabled = false
             }
         }
@@ -228,13 +259,114 @@ class ScreenReceiver: ObservableObject {
             if isComplete || error != nil { self.handleDisconnect(); return }
             guard let data, data.count == 4 else { self.handleDisconnect(); return }
 
-            let frameSize = Int(data.withUnsafeBytes { $0.load(as: UInt32.self) })
-            guard frameSize > 0, frameSize < 10_000_000 else { self.handleDisconnect(); return }
+            // Detect H264 magic: "H264" = [0x48, 0x32, 0x36, 0x34]
+            if data[0] == 0x48 && data[1] == 0x32 && data[2] == 0x36 && data[3] == 0x34 {
+                self.receiveH264Config(conn)
+                return
+            }
 
-            self.receiveAll(conn, remaining: frameSize, accumulated: Data()) { jpeg in
+            let frameSize = data.withUnsafeBytes { $0.load(as: UInt32.self) }
+
+            // Cursor packet: marker 0xFFFFFFFF + 9 bytes cursor data
+            if frameSize == 0xFFFFFFFF {
+                self.receiveCursorPacket(conn)
+                return
+            }
+
+            let size = Int(frameSize)
+            guard size > 0, size < 10_000_000 else { self.handleDisconnect(); return }
+
+            self.receiveAll(conn, remaining: size, accumulated: Data()) { jpeg in
                 if let jpeg, let image = UIImage(data: jpeg) {
-                    DispatchQueue.main.async { self.currentImage = image }
+                    DispatchQueue.main.async {
+                        self.currentImage = image
+                        if self.mode != "JPEG" { self.mode = "JPEG" }
+                    }
                 }
+                self.receiveJPEGHeader(conn)
+            }
+        }
+    }
+
+    // Receive H.264 config: port(uint16) + IP(null-terminated string)
+    private func receiveH264Config(_ conn: NWConnection) {
+        conn.receive(minimumIncompleteLength: 3, maximumLength: 30) { [weak self] data, _, isComplete, error in
+            guard let self else { return }
+            if isComplete || error != nil { self.handleDisconnect(); return }
+            guard let data, data.count >= 3 else { self.handleDisconnect(); return }
+
+            let port = data.withUnsafeBytes { $0.load(as: UInt16.self) }
+            let ipData = data.suffix(from: 2)
+            let ip = String(data: ipData.prefix(while: { $0 != 0 }), encoding: .ascii) ?? ""
+            let urlStr = "http://\(ip):\(port)"
+            print("H.264 video URL: \(urlStr)")
+
+            self.h264Mode = true
+
+            DispatchQueue.main.async {
+                self.mode = "H.264"
+                self.connectVideo(urlStr)
+            }
+
+            // Continue receiving cursor packets on control channel
+            self.receiveControlHeader(conn)
+        }
+    }
+
+    // Control channel header loop (H.264 mode: cursor packets only)
+    private func receiveControlHeader(_ conn: NWConnection) {
+        conn.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] data, _, isComplete, error in
+            guard let self else { return }
+            if isComplete || error != nil { self.handleDisconnect(); return }
+            guard let data, data.count == 4 else { self.handleDisconnect(); return }
+
+            let marker = data.withUnsafeBytes { $0.load(as: UInt32.self) }
+            if marker == 0xFFFFFFFF {
+                self.receiveCursorPacket(conn)
+            } else {
+                // Unknown, skip and continue
+                self.receiveControlHeader(conn)
+            }
+        }
+    }
+
+    // Connect AVPlayer to H.264 video URL
+    private func connectVideo(_ urlStr: String) {
+        guard let url = URL(string: urlStr) else { return }
+
+        let asset = AVURLAsset(url: url, options: [
+            AVURLAssetPreferPreciseDurationAndTimingKey: false
+        ])
+        let playerItem = AVPlayerItem(asset: asset)
+        playerItem.preferredForwardBufferDuration = 0.5
+
+        let avPlayer = AVPlayer(playerItem: playerItem)
+        avPlayer.automaticallyWaitsToMinimizeStalling = false
+
+        self.player = avPlayer
+        avPlayer.play()
+    }
+
+    private func receiveCursorPacket(_ conn: NWConnection) {
+        conn.receive(minimumIncompleteLength: 9, maximumLength: 9) { [weak self] data, _, isComplete, error in
+            guard let self else { return }
+            if isComplete || error != nil { self.handleDisconnect(); return }
+            guard let data, data.count == 9 else { self.handleDisconnect(); return }
+
+            let x = data.withUnsafeBytes { $0.load(fromByteOffset: 0, as: Float.self) }
+            let y = data.withUnsafeBytes { $0.load(fromByteOffset: 4, as: Float.self) }
+            let vis = data[8]
+
+            DispatchQueue.main.async {
+                self.cursorRelX = x
+                self.cursorRelY = y
+                self.cursorVisible = vis == 1
+            }
+
+            // Route to correct header loop based on mode
+            if self.h264Mode {
+                self.receiveControlHeader(conn)
+            } else {
                 self.receiveJPEGHeader(conn)
             }
         }
@@ -243,10 +375,14 @@ class ScreenReceiver: ObservableObject {
     private func handleDisconnect() {
         connection?.cancel()
         connection = nil
+        h264Mode = false
         DispatchQueue.main.async {
             self.currentImage = nil
+            self.player?.pause()
+            self.player = nil
             self.mode = "waiting"
             self.touchEnabled = false
+            self.cursorVisible = false
         }
         // Listener keeps running - ready for next connection automatically
         print("Disconnected. Waiting for new connection on port \(port)...")
